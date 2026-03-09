@@ -1,0 +1,13 @@
+--indent 2
+
+--closurevoid preserve
+--ifdef no-indent
+--lineaftermarks true
+--ranges no-space
+
+--disable andOperator, unusedArguments
+--swiftversion 5.8
+
+# Exclude default Logger methods which use autoclosures
+# List from https://github.com/nicklockwood/SwiftFormat/issues/1128
+--selfrequired print,debug,info,notice,warning,trace,error,critical

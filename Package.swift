@@ -16,9 +16,23 @@ let package = Package(
       name: "ViewModels",
       targets: ["ViewModels"]
     ),
+    // Product executable has to have the same name as the executable target because otherwise, there is a bug
+    // that prevents the plugin from using it.
     .executable(
-      name: "GenerateViewModels",
+      name: "Generator",
       targets: ["Generator"]
+    ),
+    .executable(
+      name: "ConfigGenerator",
+      targets: ["ConfigGenerator"]
+    ),
+    .plugin(
+      name: "GenerateViewModels",
+      targets: ["GenerateViewModelsPlugin"]
+    ),
+    .plugin(
+      name: "GenerateConfig",
+      targets: ["GenerateConfigPlugin"]
     ),
   ],
   dependencies: [
@@ -42,6 +56,9 @@ let package = Package(
       ]
     ),
     .target(
+      name: "Shared"
+    ),
+    .target(
       name: "TestModels",
       dependencies: ["ViewModels"],
       resources: [
@@ -61,6 +78,14 @@ let package = Package(
       name: "Generator",
       dependencies: [
         "ViewModels",
+        "Shared",
+        .product(name: "ArgumentParser", package: "swift-argument-parser"),
+      ]
+    ),
+    .executableTarget(
+      name: "ConfigGenerator",
+      dependencies: [
+        "Shared",
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
       ]
     ),
@@ -70,6 +95,39 @@ let package = Package(
         "ViewModels",
         "TestModels",
       ]
+    ),
+    .plugin(
+      name: "GenerateViewModelsPlugin",
+      capability: .command(
+        intent: .custom(
+          verb: "generate-viewmodels",
+          description: "Generates swift files of the provided ViewModel names"
+        ),
+        permissions: [
+          .allowNetworkConnections(scope: .all(ports: []), reason: "Fetch view model data"),
+          .writeToPackageDirectory(reason: "To save the generated model files")
+        ]
+      ),
+      dependencies: [
+        "Generator"
+      ],
+      path: "Plugins/ViewModels",
+    ),
+    .plugin(
+      name: "GenerateConfigPlugin",
+      capability: .command(
+        intent: .custom(
+          verb: "generate-config",
+          description: "Generates the default config used for model generation."
+        ),
+        permissions: [
+          .writeToPackageDirectory(reason: "To save the generated config")
+        ]
+      ),
+      dependencies: [
+        "ConfigGenerator"
+      ],
+      path: "Plugins/Config",
     ),
     // When benchmarking the parser, enable this, and its dependency.
     //

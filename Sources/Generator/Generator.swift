@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import ViewModels
+import Shared
 
 public struct AttributeMember {
   let name: String
@@ -169,8 +170,8 @@ struct Enum: Decodable {
   let type: String
   let members: [Member]
 
-  static func fetchAll() async throws -> [String: Enum] {
-    let (raw, _) = try await URLSession.shared.data(from: URL(string: "https://localhost.devdomain.name:3000/api/types")!)
+  static func fetchAll(urlSession: URLSession, domain: String) async throws -> [String: Enum] {
+    let (raw, _) = try await urlSession.data(from: URL(string: "\(domain)/api/types")!)
 
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -411,47 +412,117 @@ class Schema: ViewModel {
 @main
 struct Generate: AsyncParsableCommand {
   @Flag(help: "Write to file")
-  var write = false
+  var write: Bool = defaultConfig.write!
 
   @Flag(help: "Overwrite existing files")
-  var force = false
+  var force: Bool = defaultConfig.force!
 
   @Option(help: "output dir")
   var outputDir: String?
 
-  @Argument(help: "type")
-  var typeName: String
+  @Option(help: "The names of the types that will be generated.")
+  var typeNames: String?
 
-  @Flag(inversion: .prefixedNo, help: "Recursive")
-  var recurse = true
+  @Flag(inversion: .prefixedNo, help: "Generate models and their children.")
+  var recurse: Bool = defaultConfig.recurse!
+  
+  @Option(help: "Path to the JSON configuration file, if any.")
+  var configPath: String = ".config/generation.json"
+  
+  @Option(help: "The api url used to fetch types. Defaults to localhost.")
+  var apiDomain: String = defaultConfig.apiDomain!
 
   mutating func run() async throws {
     let fm = FileManager.default
+    
+    // Use custom session to avoid cache errors.
+    let config = URLSessionConfiguration.ephemeral
+    config.urlCache = nil
+    config.requestCachePolicy = .reloadIgnoringLocalCacheData
 
-    if let outputDir {
-      guard fm.fileExists(atPath: outputDir) else {
-        fatalError("Output directory \(outputDir) does not exist")
+    let urlSession = URLSession(configuration: config)
+    
+    var typeNames: [String] = []
+    var force = self.force
+    var outputDir = self.outputDir
+    var write = self.write
+    var recurse = self.recurse
+    var apiDomain = self.apiDomain
+    
+    // Try to read and decode the JSON file.
+    if fm.fileExists(atPath: configPath) {
+      printInfo("Reading configuration from \(configPath)...")
+      let data = try Data(contentsOf: URL(fileURLWithPath: configPath))
+      let config = try JSONDecoder().decode(PluginConfigFile.self, from: data)
+      
+      if let jsonObject = try? JSONSerialization.jsonObject(with: data),
+         let prettyData = try? JSONSerialization.data(
+          withJSONObject: jsonObject,
+          options: [.prettyPrinted, .sortedKeys]
+         ),
+         let prettyString = String(data: prettyData, encoding: .utf8)
+      {
+        printInfo(prettyString)
       }
+                
+      typeNames = config.typeNames
+      force = config.force ?? force
+      outputDir = config.outputDir ?? outputDir
+      write = config.write ?? write
+      recurse = config.recurse ?? recurse
+      apiDomain = config.apiDomain ?? apiDomain
+    } else {
+      printInfo("No config file found at \(configPath)")
+    }
+    
+    // Fallback/Override logic: If user typed specific CLI options, use those instead.
+    if let cliNames = self.typeNames {
+      typeNames = cliNames.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+    
+    if typeNames.isEmpty {
+      printInfo("No type names specified via a cli argument or the config file. Exiting...")
+      return
+    }
+
+    if let outputDir, !outputDir.isEmpty && !fm.fileExists(atPath: outputDir) {
+      printInfo("Output directory \(outputDir) does not exist. Files will not be created.")
+    }
+    
+    // Avoid path issues.
+    if (apiDomain.last == "/") {
+      apiDomain.removeLast()
     }
 
     var done = Set<String>()
-    var queue: [String] = [typeName]
+    var queueHead = 0
+    var queue = typeNames
 
-    let allEnums = try await Enum.fetchAll()
+    let allEnums = try await Enum.fetchAll(
+      urlSession: urlSession,
+      domain: apiDomain
+    )
 
     var usedEnumNames = Set<String>()
 
-    while !queue.isEmpty {
-      let work = queue.removeFirst() // TODO: O(n)
+    while queueHead < queue.count  {
+      let work = queue[queueHead]
+      queueHead += 1
 
-      let (data, _) = try await URLSession.shared.data(from: URL(string: "https://localhost.devdomain.name:3000/api/schemas/\(work)")!)
+      let (data, _) = try await urlSession.data(from: URL(string: "\(apiDomain)/api/schemas/\(work)")!)
 
-      print("Parsing: \(work)")
+      printInfo("Parsing: \(work)")
       let schema = try! ViewModel.deserialize(json: data, type: Schema.self)
 
       let generated = schema.generate()
 
-      try emit(filename: "\(schema.name).swift", contents: generated)
+      try emit(
+        filename: "\(schema.name).swift",
+        contents: generated,
+        write: write,
+        outputDir: outputDir,
+        force: force
+      )
 
       if recurse {
         for attribute in schema.attributes() {
@@ -472,23 +543,44 @@ struct Generate: AsyncParsableCommand {
       let e = allEnums[name]!
       let generated = e.generate()
 
-      try emit(filename: "\(name).swift", contents: generated)
+      try emit(
+        filename: "\(name).swift",
+        contents: generated,
+        write: write,
+        outputDir: outputDir,
+        force: force
+      )
     }
   }
 
-  func emit(filename: String, contents: String) throws {
+  func emit(
+    filename: String,
+    contents: String,
+    write: Bool,
+    outputDir: String?,
+    force: Bool
+  ) throws {
     let fm = FileManager.default
 
     if write {
       let outPath = outputDir.map { "\($0)/\(filename)" } ?? filename
       if force || !fm.fileExists(atPath: outPath) {
-        print("Writing to \(outPath)")
+        printInfo("Writing to \(outPath)")
         try contents.write(toFile: outPath, atomically: true, encoding: .utf8)
       } else {
-        print("Skipping \(outPath)")
+        printInfo("Skipping \(outPath)")
       }
     } else {
-      print(contents)
+      printCode(contents)
     }
   }
+}
+
+/// Adds markers so that write commands can strip out debug messages and just write code.
+func printInfo(_ message: String) {
+  print("[INFO] \(message) [/INFO]")
+}
+/// Just a wrapper to make things clear and facilitate future refactoring.
+func printCode(_ code: String) {
+  print(code)
 }
